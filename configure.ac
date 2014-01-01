@@ -23,7 +23,7 @@ AC_SUBST(lt_major)
 AC_SUBST(lt_revision)
 AC_SUBST(lt_age)
 
-all_drivers="upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes1660 aes2501 aes2550 aes2660 aes3500 aes4000 vfs101 vfs301 upektc_img etes603"
+all_drivers="upekts upektc upeksonly vcom5s uru4000 fdu2000 aes1610 aes1660 aes2501 aes2550 aes2660 aes3500 aes4000 vfs101 vfs301 upektc_img etes603 vfs0050"
 
 require_imaging='no'
 require_aeslib='no'
@@ -47,6 +47,7 @@ enable_vfs101='no'
 enable_vfs301='no'
 enable_upektc_img='no'
 enable_etes603='no'
+enable_vfs0050='no'
 
 AC_ARG_WITH([drivers],[AS_HELP_STRING([--with-drivers],
 	[List of drivers to enable])],
@@ -59,6 +60,10 @@ fi
 
 for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 	case ${driver} in
+                vfs0050)
+                        AC_DEFINE([ENABLE_VFS0050], [], [Build Validity 0050 driver])
+                        enable_vfs0050="yes"
+                ;;
 		upekts)
 			AC_DEFINE([ENABLE_UPEKTS], [], [Build UPEK TouchStrip driver])
 			enable_upekts="yes"
@@ -169,6 +174,7 @@ AM_CONDITIONAL([ENABLE_VFS101], [test "$enable_vfs101" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS301], [test "$enable_vfs301" = "yes"])
 AM_CONDITIONAL([ENABLE_UPEKTC_IMG], [test "$enable_upektc_img" = "yes"])
 AM_CONDITIONAL([ENABLE_ETES603], [test "$enable_etes603" = "yes"])
+AM_CONDITIONAL([ENABLE_VFS0050], [test "$enable_vfs0050" = "yes"])
 
 
 PKG_CHECK_MODULES(LIBUSB, [libusb-1.0 >= 0.9.1])
@@ -295,6 +301,11 @@ else
 	AC_MSG_NOTICE([   Imaging support disabled])
 fi
 
+if test x$enable_vfs0050 != xno ; then
+        AC_MSG_NOTICE([** vfs0050 driver enabled])
+else
+        AC_MSG_NOTICE([   vfs0050 driver disabled])
+fi
 if test x$enable_upekts != xno ; then
 	AC_MSG_NOTICE([** upekts driver enabled])
 else

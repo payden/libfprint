@@ -20,6 +20,7 @@ VFS101_SRC = drivers/vfs101.c
 VFS301_SRC = drivers/vfs301.c drivers/vfs301_proto.c  drivers/vfs301_proto.h drivers/vfs301_proto_fragments.h
 UPEKTC_IMG_SRC = drivers/upektc_img.c drivers/upektc_img.h
 ETES603_SRC = drivers/etes603.c
+VFS0050_SRC = drivers/vfs0050.c drivers/vfs0050.h
 
 EXTRA_DIST = \
 	$(UPEKE2_SRC)		\
@@ -40,6 +41,7 @@ EXTRA_DIST = \
 	$(VFS301_SRC)		\
 	$(UPEKTC_IMG_SRC)	\
 	$(ETES603_SRC)		\
+        $(VFS0050_SRC)          \
 	drivers/aesx660.c	\
 	drivers/aesx660.h	\
 	drivers/aes3k.c 	\
@@ -174,6 +176,10 @@ endif
 
 if ENABLE_ETES603
 DRIVER_SRC += $(ETES603_SRC)
+endif
+
+if ENABLE_VFS0050
+DRIVER_SRC += $(VFS0050_SRC)
 endif
 
 if REQUIRE_PIXMAN
