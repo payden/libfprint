@@ -50,7 +50,6 @@ enum {
 
 static void state_activate_cb(struct libusb_transfer *transfer)
 {
-    int tmp;
     struct fpi_ssm *ssm = transfer->user_data;
     struct fp_img_dev *dev = ssm->priv;
     struct vfs0050_dev *vfs_dev = dev->priv;
@@ -184,7 +183,7 @@ static void state_activate(struct fpi_ssm *ssm)
         vfs_dev->activate_offset = 0;
         vfs_dev->scanbuf_idx = 0;
         if (!vfs_dev->is_active) {
-            fp_dbg("fucking a man");
+            fpi_ssm_mark_completed(ssm);
         } else {
             fpi_ssm_jump_to_state(ssm, M_ACTIVATE_START);
         }
@@ -265,7 +264,6 @@ static void state_init_cb(struct libusb_transfer *transfer)
 static void state_init(struct fpi_ssm *ssm)
 {
     int transferred;
-    int ret;
     int to_send;
     struct libusb_transfer *transfer;
     struct fp_img_dev *dev = ssm->priv;
@@ -274,8 +272,8 @@ static void state_init(struct fpi_ssm *ssm)
     case M_INIT_START:
         //couple of synchronous transfers here in the beginning, don't think this hurts much.
         vfs_dev->tmpbuf[0] = 0x1a;
-        ret = libusb_bulk_transfer(dev->udev, EP1_OUT, vfs_dev->tmpbuf, 1, &transferred, BULK_TIMEOUT);
-        ret = libusb_bulk_transfer(dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, &transferred, BULK_TIMEOUT);
+        libusb_bulk_transfer(dev->udev, EP1_OUT, vfs_dev->tmpbuf, 1, &transferred, BULK_TIMEOUT);
+        libusb_bulk_transfer(dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, &transferred, BULK_TIMEOUT);
         fpi_ssm_next_state(ssm);
         break;
     case M_INIT_1_ONGOING:
