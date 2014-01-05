@@ -15,6 +15,18 @@
 
 static int is_noise(struct vfs0050_line *a)
 {
+    int i;
+    int total_white = 0;
+    int total_black = 0;
+    for (i = 0; i < VFS0050_IMG_WIDTH; i++) {
+        if (a->row[i] >= WHITE_THRESH)
+            total_white++;
+        if (a->row[i] <= BLACK_THRESH)
+            total_black++;
+    }
+    if (total_black < 5 && total_white < 5) {
+        return 1;
+    }
     return 0;
 }
 
@@ -77,12 +89,12 @@ static void tmp_writeout_buf(struct fp_img_dev *dev)
     int i, x;
     char tmpbuf[100];
     fwrite("P2\n", 3, 1, fp);
-    sprintf(tmpbuf, "%d %d\n", VFS0050_IMG_WIDTH, (vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE));
+    sprintf(tmpbuf, "%d %d\n", VFS0050_IMG_WIDTH + 32, (vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE));
     fwrite(tmpbuf, strlen(tmpbuf), 1, fp);
     fwrite("255\n", 4, 1, fp);
-    for (i = 0; i < vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE; i++) {
+    for (i = 0; i < (vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE); i++) {
         line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * VFS0050_FRAME_SIZE));
-        for (x = 0; x < VFS0050_IMG_WIDTH; x++) {
+        for (x = 0; x < VFS0050_IMG_WIDTH + 32; x++) {
             sprintf(tmpbuf, "%d\t", line->row[x] & 0xff);
             fwrite(tmpbuf, strlen(tmpbuf), 1, fp);
         }
