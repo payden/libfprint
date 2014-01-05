@@ -114,7 +114,6 @@ static int submit_image(struct fp_img_dev *dev)
     return 1;
 }
 
-
 //activate ssm states
 enum {
     M_ACTIVATE_START,
@@ -128,6 +127,18 @@ enum {
     M_ACTIVATE_POST_RECEIVE,
     M_ACTIVATE_NUMSTATES
 };
+
+static void async_sleep_cb(void *data)
+{
+    struct fpi_ssm *ssm = data;
+    struct fp_img_dev *dev = ssm->priv;
+    struct vfs0050_dev *vfs_dev = dev->priv;
+    if (vfs_dev->is_active) {
+        fpi_ssm_jump_to_state(ssm, M_ACTIVATE_START);
+    } else {
+        fpi_ssm_next_state(ssm);
+    }
+}
 
 static void state_activate_cb(struct libusb_transfer *transfer)
 {
@@ -271,11 +282,7 @@ static void state_activate(struct fpi_ssm *ssm)
         fpi_imgdev_report_finger_status(dev, FALSE);
         vfs_dev->activate_offset = 0;
         vfs_dev->scanbuf_idx = 0;
-        if (!vfs_dev->is_active) {
-            fpi_ssm_mark_completed(ssm);
-        } else {
-            fpi_ssm_jump_to_state(ssm, M_ACTIVATE_START);
-        }
+        fpi_timeout_add(300, async_sleep_cb, ssm); //wait a bit and see if we're swiping again.
         break;
 
     }
