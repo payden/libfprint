@@ -5,29 +5,110 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <pixman.h>
+#include <math.h>
 
 #include <fp_internal.h>
 
 #include "vfs0050.h"
 #include "driver_ids.h"
 
+static int is_noise(struct vfs0050_line *a)
+{
+    return 0;
+}
+
+static void process_image_data(struct fp_img_dev *dev, char **output, int *output_height)
+{
+    //pixman stuff taken from libfprint/pixman.c, adapted for my purposes.
+    pixman_image_t *orig, *resized;
+    pixman_transform_t transform;
+    struct vfs0050_dev *vfs_dev = dev->priv;
+    struct vfs0050_line *line, *calibration_line;
+    char *buf = malloc(vfs_dev->scanbuf_idx);
+    int lines = vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE;
+    int i, x, sum, last_sum, diff;
+    int new_height;
+    //just grab one around middle, there should be 100
+    calibration_line = (struct vfs0050_line *) ((char *) vfs_dev->calbuf + (50 * VFS0050_FRAME_SIZE));
+
+    new_height = 0;
+    for (i = 0; i < lines; i++) {
+        line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * VFS0050_FRAME_SIZE));
+        if (!is_noise(line))
+            memcpy(buf + (new_height++ * VFS0050_IMG_WIDTH), line->row, VFS0050_IMG_WIDTH);
+        else
+            fp_dbg("removed noise at line: %d\n", i);
+    }
+
+    orig = pixman_image_create_bits(PIXMAN_a8, VFS0050_IMG_WIDTH, new_height, (uint32_t *) buf, VFS0050_IMG_WIDTH);
+    new_height *= VFS0050_SCALE_FACTOR; //scale for resized image
+    resized = pixman_image_create_bits(PIXMAN_a8, VFS0050_IMG_WIDTH, new_height, NULL, VFS0050_IMG_WIDTH);
+    pixman_transform_init_identity(&transform);
+    pixman_transform_scale(NULL, &transform, pixman_int_to_fixed(1), pixman_double_to_fixed(0.2));
+    pixman_image_set_transform(orig, &transform);
+    pixman_image_set_filter(orig, PIXMAN_FILTER_BEST, NULL, 0);
+    pixman_image_composite32(PIXMAN_OP_SRC,
+            orig,
+            NULL,
+            resized,
+            0, 0,
+            0, 0,
+            0, 0,
+            VFS0050_IMG_WIDTH, new_height
+            );
+    memcpy(buf, pixman_image_get_data(resized), VFS0050_IMG_WIDTH * new_height);
+
+    pixman_image_unref(orig);
+    pixman_image_unref(resized);
+
+    *output_height = new_height;
+    *output = buf;
+}
+
+static void tmp_writeout_buf(struct fp_img_dev *dev)
+{
+    struct vfs0050_dev *vfs_dev = dev->priv;
+    FILE *fp = fopen("/tmp/test.pgm", "w");
+    if (!fp) {
+        return;
+    }
+    struct vfs0050_line *line;
+    int i, x;
+    char tmpbuf[100];
+    fwrite("P2\n", 3, 1, fp);
+    sprintf(tmpbuf, "%d %d\n", VFS0050_IMG_WIDTH, (vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE));
+    fwrite(tmpbuf, strlen(tmpbuf), 1, fp);
+    fwrite("255\n", 4, 1, fp);
+    for (i = 0; i < vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE; i++) {
+        line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * VFS0050_FRAME_SIZE));
+        for (x = 0; x < VFS0050_IMG_WIDTH; x++) {
+            sprintf(tmpbuf, "%d\t", line->row[x] & 0xff);
+            fwrite(tmpbuf, strlen(tmpbuf), 1, fp);
+        }
+        fwrite("\n", 1, 1, fp);
+    }
+    fclose(fp);
+}
 
 static int submit_image(struct fp_img_dev *dev)
 {
     struct vfs0050_dev *vfs_dev = dev->priv;
     struct fp_img *img = NULL;
-    struct vfs0050_line *line;
-    int lines = vfs_dev->scanbuf_idx / 148;
-    int i;
-    img = fpi_img_new(VFS0050_IMG_WIDTH * lines);
+    int final_height;
+    char *processed_image;
+    tmp_writeout_buf(dev);
+    
+    process_image_data(dev, &processed_image, &final_height); //the fun part
+
+    img = fpi_img_new(VFS0050_IMG_WIDTH * final_height);
     if (img == NULL)
         return 0;
-    for (i = 0; i < lines; i++) {
-        line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * sizeof(struct vfs0050_line)));
-        memcpy(img->data + (i * VFS0050_IMG_WIDTH), line->row, VFS0050_IMG_WIDTH);
-    }
+
+    memcpy(img->data, processed_image, final_height * VFS0050_IMG_WIDTH);
+    free(processed_image);
     img->width = VFS0050_IMG_WIDTH;
-    img->height = lines;
+    img->height = final_height;
     img->flags = FP_IMG_V_FLIPPED;
     fpi_imgdev_image_captured(dev, img);
     return 1;
@@ -58,6 +139,9 @@ static void state_activate_cb(struct libusb_transfer *transfer)
         //check bytes are 0x00 and 0x00
         if (vfs_dev->tmpbuf[0] != 0x00 || vfs_dev->tmpbuf[1] != 0x00) {
             fp_dbg("unexpected bytes back from endpoint in M_ACTIVATE_1_SINGLE_READ");
+            libusb_free_transfer(transfer);
+            fpi_ssm_jump_to_state(ssm, M_ACTIVATE_START);
+            break;
         }
         libusb_free_transfer(transfer);
         fpi_ssm_next_state(ssm);
@@ -90,16 +174,21 @@ static void state_activate_cb(struct libusb_transfer *transfer)
     case M_ACTIVATE_AWAIT_FINGER:
         //if we got here, it's time to read fingerprint data.
         //interrupt data should be 02 00 0e 00 f0
-        if (transfer->actual_length != 5) {
-            fp_dbg("unexpected length for interrupt transfer in M_ACTIVATE_AWAIT_FINGER");
-            //TODO: fail here, exit ssm.
+        if (vfs_dev->is_active) {
+            if (transfer->actual_length != 5) {
+                fp_dbg("unexpected length for interrupt transfer in M_ACTIVATE_AWAIT_FINGER");
+                //TODO: fail here, exit ssm.
+            }
+            if (memcmp(vfs_dev->tmpbuf, vfs0050_valid_interrupt, 5) != 0) {
+                fp_dbg("invalid interrupt data in M_ACTIVATE_AWAIT_FINGER");
+                //TODO: fail here, exit ssm.
+            }
+            fpi_imgdev_report_finger_status(dev, TRUE); //report finger on to libfprint
+            fpi_ssm_next_state(ssm);
+        } else {
+            fpi_ssm_mark_completed(ssm);
+            //break fall through
         }
-        if (memcmp(vfs_dev->tmpbuf, vfs0050_valid_interrupt, 5) != 0) {
-            fp_dbg("invalid interrupt data in M_ACTIVATE_AWAIT_FINGER");
-            //TODO: fail here, exit ssm.
-        }
-        fpi_imgdev_report_finger_status(dev, TRUE); //report finger on to libfprint
-        fpi_ssm_next_state(ssm);
         break;
     case M_ACTIVATE_RECEIVE_FINGERPRINT:
         if (transfer->actual_length == 0) {
@@ -126,6 +215,7 @@ static void state_activate(struct fpi_ssm *ssm)
     int to_send;
     switch (ssm->cur_state) {
     case M_ACTIVATE_START:
+        vfs_dev->activate_offset = 0;
         transfer = libusb_alloc_transfer(0);
         libusb_fill_bulk_transfer(transfer, dev->udev, EP1_OUT, vfs0050_activate1, 64, state_activate_cb, ssm, BULK_TIMEOUT);
         libusb_submit_transfer(transfer);
@@ -173,13 +263,12 @@ static void state_activate(struct fpi_ssm *ssm)
             vfs_dev->scanbuf = g_realloc(vfs_dev->scanbuf, vfs_dev->scanbuf_sz);
         }
         transfer = libusb_alloc_transfer(0);
-        libusb_fill_bulk_transfer(transfer, dev->udev, EP2_IN, vfs_dev->scanbuf + vfs_dev->scanbuf_idx, 64, state_activate_cb, ssm, BULK_TIMEOUT);
+        libusb_fill_bulk_transfer(transfer, dev->udev, EP2_IN, vfs_dev->scanbuf + vfs_dev->scanbuf_idx, 64, state_activate_cb, ssm, 500);
         libusb_submit_transfer(transfer);
         break;
     case M_ACTIVATE_POST_RECEIVE:
         submit_image(dev);
         fpi_imgdev_report_finger_status(dev, FALSE);
-        fprintf(stderr, "Got fingerprint data: %d\n", vfs_dev->scanbuf_idx);
         vfs_dev->activate_offset = 0;
         vfs_dev->scanbuf_idx = 0;
         if (!vfs_dev->is_active) {
@@ -206,7 +295,7 @@ enum {
     M_INIT_1_STEP4,
     M_INIT_2_ONGOING,
     M_INIT_2_RECV_EP1_ONGOING,
-    M_INIT_2_RECV_EP2_ONGOING,
+    M_INIT_2_RECV_EP2_ONGOING, //TODO: this looks like some sensor calibration data, could be useful later.
     M_INIT_2_COMPLETE,
     M_INIT_NUMSTATES,
 };
@@ -238,8 +327,6 @@ static void state_init_cb(struct libusb_transfer *transfer)
         break;
     case M_INIT_2_RECV_EP1_ONGOING:
         //we wait for a timeout here indicating no more data to receive.
-        fprintf(stderr, "Transfer status in recv ongoing: %d\n", transfer->status);
-        fprintf(stderr, "actual length: %d\n", transfer->actual_length);
         if (transfer->actual_length < 64) {
             fpi_ssm_next_state(ssm);
             break;
@@ -247,6 +334,7 @@ static void state_init_cb(struct libusb_transfer *transfer)
         fpi_ssm_jump_to_state(ssm, M_INIT_2_RECV_EP1_ONGOING);
         break;
     case M_INIT_2_RECV_EP2_ONGOING:
+        vfs_dev->calbuf_idx += transfer->actual_length;
         if (transfer->actual_length < 64) {
             fpi_ssm_next_state(ssm);
             break;
@@ -314,8 +402,12 @@ static void state_init(struct fpi_ssm *ssm)
         libusb_submit_transfer(transfer);
         break;
     case M_INIT_2_RECV_EP2_ONGOING:
+        if (vfs_dev->calbuf_idx + 64 >= vfs_dev->calbuf_sz) {
+            vfs_dev->calbuf_sz <<= 1;
+            vfs_dev->calbuf = g_realloc(vfs_dev->calbuf, vfs_dev->calbuf_sz);
+        }
         transfer = libusb_alloc_transfer(0);
-        libusb_fill_bulk_transfer(transfer, dev->udev, EP2_IN, vfs_dev->tmpbuf, 64, state_init_cb, ssm, BULK_TIMEOUT);
+        libusb_fill_bulk_transfer(transfer, dev->udev, EP2_IN, vfs_dev->calbuf + vfs_dev->calbuf_idx, 64, state_init_cb, ssm, BULK_TIMEOUT);
         libusb_submit_transfer(transfer);
         break;
     default:
@@ -331,11 +423,62 @@ static void state_init_complete(struct fpi_ssm *ssm)
     fpi_ssm_free(ssm);
 }
 
+static void generic_async_cb(struct libusb_transfer *t)
+{
+    libusb_free_transfer(t);
+}
 
 static void dev_deactivate(struct fp_img_dev *dev)
 {
     struct vfs0050_dev *vfs_dev = dev->priv;
+    int err = 0;
+    int tmpoffset;
+    int to_send;
+    struct libusb_transfer *t;
     vfs_dev->is_active = 0;
+    //EP2 IN
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP2_IN, vfs_dev->tmpbuf, 64, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //EP1_IN
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //EP1_OUT
+    t = libusb_alloc_transfer(0);
+    vfs_dev->tmpbuf[0] = 0x04;
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_OUT, vfs_dev->tmpbuf, 1, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //EP1_IN
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //EP1_OUT
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_OUT, vfs0050_deactivate1, 64, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //EP1_OUT
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_OUT, &vfs0050_deactivate1[64], 61, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    tmpoffset = 0;
+    do {
+        to_send = sizeof(vfs0050_activate2) - tmpoffset;
+        to_send = to_send >= 64 ? 64 : to_send;
+        t = libusb_alloc_transfer(0);
+        libusb_fill_bulk_transfer(t, dev->udev, EP1_OUT, vfs0050_activate2 + tmpoffset, to_send, generic_async_cb, NULL, 100);
+        libusb_submit_transfer(t);
+        tmpoffset += err;
+    } while (err == 64);
+    do {
+        t = libusb_alloc_transfer(0);
+        libusb_fill_bulk_transfer(t, dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, generic_async_cb, NULL, 100);
+        libusb_submit_transfer(t);
+    } while(err == 64);
+    t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, dev->udev, EP1_IN, vfs_dev->tmpbuf, 64, generic_async_cb, NULL, 100);
+    libusb_submit_transfer(t);
+    //TODO: finish this, leaves device in inconsistent state.
     fpi_imgdev_deactivate_complete(dev);
 }
 
@@ -372,6 +515,8 @@ static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
     vdev = g_malloc0(sizeof(struct vfs0050_dev));
     vdev->scanbuf = g_malloc0(VFS0050_INITIAL_SCANBUF_SIZE);
     vdev->scanbuf_sz = VFS0050_INITIAL_SCANBUF_SIZE;
+    vdev->calbuf = g_malloc0(VFS0050_INITIAL_SCANBUF_SIZE);
+    vdev->calbuf_sz = VFS0050_INITIAL_SCANBUF_SIZE;
     dev->priv = vdev;
     init_ssm = fpi_ssm_new(dev->dev, state_init, M_INIT_NUMSTATES);
     init_ssm->priv = dev;
@@ -384,6 +529,7 @@ static void dev_close(struct fp_img_dev *dev)
 {
     fp_dbg("dev_close called");
     //release private structure
+    g_free(((struct vfs0050_dev *)dev->priv)->calbuf);
     g_free(((struct vfs0050_dev *)dev->priv)->scanbuf);
     g_free(dev->priv);
 
