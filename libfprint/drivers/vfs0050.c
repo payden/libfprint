@@ -4,14 +4,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/time.h>
 #include <assert.h>
 #include <pixman.h>
 #include <math.h>
 
 #include <fp_internal.h>
 
+#define THE_CONSTANT 1400000046.02
 #include "vfs0050.h"
 #include "driver_ids.h"
+
+int timeval_subtract(struct timeval *result, struct timeval *x,  struct timeval *y)
+{
+    if (x->tv_usec < y->tv_usec) {
+        int nsec = (y->tv_usec - x->tv_usec) / 1000000 + 1;
+        y->tv_usec -= 1000000 * nsec;
+        y->tv_sec += nsec;
+    }
+    if (x->tv_usec - y->tv_usec > 1000000) {
+        int nsec = (x->tv_usec - y->tv_usec) / 1000000;
+        y->tv_usec += 1000000 * nsec;
+        y->tv_sec -= nsec;
+    }
+     
+    result->tv_sec = x->tv_sec - y->tv_sec;
+    result->tv_usec = x->tv_usec - y->tv_usec;
+     
+    return x->tv_sec < y->tv_sec;
+}
 
 static int is_noise(struct vfs0050_line *a)
 {
@@ -36,14 +57,16 @@ static void process_image_data(struct fp_img_dev *dev, char **output, int *outpu
     pixman_image_t *orig, *resized;
     pixman_transform_t transform;
     struct vfs0050_dev *vfs_dev = dev->priv;
-    struct vfs0050_line *line, *calibration_line;
+    struct vfs0050_line *line;
     char *buf = malloc(vfs_dev->scanbuf_idx);
     int lines = vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE;
-    int i, x, sum, last_sum, diff;
+    int i;
     int new_height;
-    //just grab one around middle, there should be 100
-    calibration_line = (struct vfs0050_line *) ((char *) vfs_dev->calbuf + (50 * VFS0050_FRAME_SIZE));
-
+    double tusec = (vfs_dev->scan_time.tv_sec * 1000000) + vfs_dev->scan_time.tv_usec;
+    double scale_factor = pow((1 / tusec), 2) * THE_CONSTANT;
+    scale_factor *= 100;
+    fprintf(stderr, "scale factor: %f\n", scale_factor);
+    fprintf(stderr, "scan time: %f\n", tusec);
     new_height = 0;
     for (i = 0; i < lines; i++) {
         line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * VFS0050_FRAME_SIZE));
@@ -54,10 +77,10 @@ static void process_image_data(struct fp_img_dev *dev, char **output, int *outpu
     }
 
     orig = pixman_image_create_bits(PIXMAN_a8, VFS0050_IMG_WIDTH, new_height, (uint32_t *) buf, VFS0050_IMG_WIDTH);
-    new_height *= VFS0050_SCALE_FACTOR; //scale for resized image
+    new_height *= scale_factor; //scale for resized image
     resized = pixman_image_create_bits(PIXMAN_a8, VFS0050_IMG_WIDTH, new_height, NULL, VFS0050_IMG_WIDTH);
     pixman_transform_init_identity(&transform);
-    pixman_transform_scale(NULL, &transform, pixman_int_to_fixed(1), pixman_double_to_fixed(0.2));
+    pixman_transform_scale(NULL, &transform, pixman_int_to_fixed(1), pixman_double_to_fixed(scale_factor));
     pixman_image_set_transform(orig, &transform);
     pixman_image_set_filter(orig, PIXMAN_FILTER_BEST, NULL, 0);
     pixman_image_composite32(PIXMAN_OP_SRC,
@@ -105,7 +128,6 @@ static void tmp_writeout_buf(struct fp_img_dev *dev)
 
 static int submit_image(struct fp_img_dev *dev)
 {
-    struct vfs0050_dev *vfs_dev = dev->priv;
     struct fp_img *img = NULL;
     int final_height;
     char *processed_image;
@@ -207,6 +229,7 @@ static void state_activate_cb(struct libusb_transfer *transfer)
                 //TODO: fail here, exit ssm.
             }
             fpi_imgdev_report_finger_status(dev, TRUE); //report finger on to libfprint
+            gettimeofday(&vfs_dev->scan_start, NULL);
             fpi_ssm_next_state(ssm);
         } else {
             fpi_ssm_mark_completed(ssm);
@@ -215,6 +238,9 @@ static void state_activate_cb(struct libusb_transfer *transfer)
         break;
     case M_ACTIVATE_RECEIVE_FINGERPRINT:
         if (transfer->actual_length == 0) {
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            timeval_subtract(&vfs_dev->scan_time, &now, &vfs_dev->scan_start);
             libusb_free_transfer(transfer);
             fpi_ssm_next_state(ssm);
             break;

@@ -26,6 +26,8 @@ struct vfs0050_dev {
     int scanbuf_idx;
     int scanbuf_sz;
     int is_active;
+    struct timeval scan_start;
+    struct timeval scan_time;
 };
 
 struct vfs0050_line {
