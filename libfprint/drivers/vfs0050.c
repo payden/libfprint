@@ -7,8 +7,10 @@
 #include <assert.h>
 #include <pixman.h>
 #include <math.h>
-
 #include <fp_internal.h>
+
+#define DUALLINE_WIDTH 32
+#define CHUNK_COMPARE_HEIGHT 32
 
 #include "vfs0050.h"
 #include "driver_ids.h"
@@ -30,6 +32,48 @@ static int is_noise(struct vfs0050_line *a)
     return 0;
 }
 
+static int compare_chunks(const char *chunk1, const char *chunk2)
+{
+    //compare size is assumed to be 32 x 32 chunk of image.
+    int i, x;
+    int total_sum = 0;
+    int pixel_diff;
+    int column_sum;
+    int column_avg;
+    for (i = 0; i < DUALLINE_WIDTH; i++) {
+        column_sum = 0;
+        for (x = 0; x < CHUNK_COMPARE_HEIGHT; x++) {
+            pixel_diff = abs((uint8_t) *(chunk1 + (i * DUALLINE_WIDTH) + x) - (uint8_t) *(chunk2 + (i * DUALLINE_WIDTH) + x));
+            column_sum += pixel_diff;
+        }
+        column_avg = column_sum / CHUNK_COMPARE_HEIGHT; //avg diff between two columns
+        total_sum += column_avg;
+    }
+        
+    return total_sum / DUALLINE_WIDTH;
+}
+
+
+static int find_dual_line_offset(int lineno, int linecount, char *dual_buf_subset, char *dual_buf_orig)
+{
+    int lowest = 0x7fffffff;
+    int i;
+    int current_diff;
+    int current_offset = -1;
+    char *start;
+    int max = lineno + CHUNK_COMPARE_HEIGHT;
+    max = max > (linecount - CHUNK_COMPARE_HEIGHT) ? (linecount - CHUNK_COMPARE_HEIGHT) : max;
+    char *compare_start = dual_buf_orig + (lineno * DUALLINE_WIDTH); //what we're trying to match in the secondary scanline.
+    for (i = lineno; i < max; i++) {
+        current_diff = compare_chunks(compare_start, dual_buf_subset + (DUALLINE_WIDTH * i));
+        if (current_diff <= lowest) {
+            lowest = current_diff;
+            current_offset = i - lineno;
+        }
+    }
+    return current_offset;
+}
+
 static void process_image_data(struct fp_img_dev *dev, char **output, int *output_height)
 {
     //pixman stuff taken from libfprint/pixman.c, adapted for my purposes.
@@ -37,8 +81,10 @@ static void process_image_data(struct fp_img_dev *dev, char **output, int *outpu
     pixman_transform_t transform;
     struct vfs0050_dev *vfs_dev = dev->priv;
     struct vfs0050_line *line, *calibration_line;
-    char *buf = malloc(vfs_dev->scanbuf_idx);
+    char *buf = g_malloc(vfs_dev->scanbuf_idx);
     int lines = vfs_dev->scanbuf_idx / VFS0050_FRAME_SIZE;
+    char *dual_buf = g_malloc(lines * 32);
+    char *dual_buf_match = g_malloc(lines * 32);
     int i, x, sum, last_sum, diff;
     int new_height;
     //just grab one around middle, there should be 100
@@ -47,11 +93,22 @@ static void process_image_data(struct fp_img_dev *dev, char **output, int *outpu
     new_height = 0;
     for (i = 0; i < lines; i++) {
         line = (struct vfs0050_line *) ((char *) vfs_dev->scanbuf + (i * VFS0050_FRAME_SIZE));
-        if (!is_noise(line))
+        if (!is_noise(line)) {
+            memcpy(dual_buf + (new_height * 32), line->dual, 32);
+            memcpy(dual_buf_match + (new_height * 32) + 32, line->row, 32);
             memcpy(buf + (new_height++ * VFS0050_IMG_WIDTH), line->row, VFS0050_IMG_WIDTH);
-        else
+        } else {
             fp_dbg("removed noise at line: %d\n", i);
+        }
     }
+
+    for (i = 0; i < lines; i += CHUNK_COMPARE_HEIGHT) {
+        if (i > lines)
+            break;
+        int offset = find_dual_line_offset(i, lines, dual_buf, dual_buf_match);
+        fprintf(stderr, "lowest offset for line %d is %d\n", i, offset);
+    }
+
 
     orig = pixman_image_create_bits(PIXMAN_a8, VFS0050_IMG_WIDTH, new_height, (uint32_t *) buf, VFS0050_IMG_WIDTH);
     new_height *= VFS0050_SCALE_FACTOR; //scale for resized image
@@ -118,7 +175,7 @@ static int submit_image(struct fp_img_dev *dev)
         return 0;
 
     memcpy(img->data, processed_image, final_height * VFS0050_IMG_WIDTH);
-    free(processed_image);
+    g_free(processed_image);
     img->width = VFS0050_IMG_WIDTH;
     img->height = final_height;
     img->flags = FP_IMG_V_FLIPPED;

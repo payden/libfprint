@@ -38,7 +38,7 @@ struct vfs0050_line {
 	unsigned char _0x00;
 	unsigned char _counter; //not sure what this is either.
 	unsigned char row[100]; //grayscale data
-	unsigned char mag[32]; //magnified portion of scan
+	unsigned char dual[32]; //magnified portion of scan
 	unsigned char sums[8];
 } __attribute__((__packed__));
 
